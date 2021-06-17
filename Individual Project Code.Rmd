@@ -1,0 +1,332 @@
+---
+title: "Data Science Individual Project"
+author: "Tongyao Cui"
+date: "11/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+#Data Cleaning
+```{r}
+source("DataAnalyticsFunctions.R")
+source("installpackages.R")
+library(tidyverse)
+library(readr)
+library(Hmisc)
+library(ggpubr)
+library(MASS)
+library(scales)
+library(ggcorrplot)
+library(eeptools)
+library(tree)
+library(partykit)
+library(randomForest)
+library(caret)
+udemy <- read.csv("Udemy.csv")
+
+#Remove columns: url,created,discount_price_currency,discount_price_price_string,price_detai_currency,price_detail_price_string
+udemy <- udemy %>% dplyr::select(-url, -created, -discount_price__currency, -rating, -discount_price__price_string, -price_detail__currency, -price_detail__price_string)
+
+#Filter out 0 number of published lectures
+udemy <- udemy %>% filter(num_published_lectures!= 0)
+
+#Some cells in discount price and actual price were blank, indicating the customer did not pay or the price was not discounted, replace the blank with 0
+udemy[is.na(udemy)] = 0
+
+#Change the currency from Rupees to US dollar
+udemy$discount_price__amount <- as.numeric(udemy$discount_price__amount/74.5)
+udemy$price_detail__amount <- as.numeric(udemy$price_detail__amount/74.5)
+
+#Clean up published_ time and transform into Date
+udemy$published_time <- strftime(udemy$published_time, format="%Y-%m-%d")
+udemy$published_time <- as.Date(udemy$published_time)
+
+#to see if the course's time on the platform is correlated with number of subscribers, find the age for each course in months
+age <- age_calc(udemy$published_time, enddate = Sys.Date(), units = "months", precise = TRUE)
+udemy <- cbind(udemy,age)
+
+#Transform data
+udemy %>% ggplot() + geom_histogram(aes(x=(num_subscribers)))
+ggplot(udemy, aes(sample=num_subscribers)) +
+  stat_qq(color="dodgerblue4") + 
+  stat_qq_line(color="red") +
+  scale_y_continuous(labels=function(y){y/10^6}) +
+  labs(title="QQ Plot for Number of Subscribers", y="Ordered Values") +
+  theme(plot.title=element_text(hjust=0.5))
+  #Both the histogram and the QQ plot shows that the distribution of the number of subscribers is skewed to the right
+  #Thus, from log transformation, both the QQ plot and histogram suggest better normal distribution of the data
+udemy %>% ggplot() + geom_histogram(aes(x=log(num_subscribers)))
+ggplot(udemy, aes(sample=log(num_subscribers))) +
+  stat_qq(color="dodgerblue4") + 
+  stat_qq_line(color="red") +
+  scale_y_continuous(labels=function(y){y/10^6}) +
+  labs(title="QQ Plot for Number of Subscribers", y="Ordered Values") +
+  theme(plot.title=element_text(hjust=0.5))
+
+#Because log cannot handle zero, I eliminated 0 from y variable. Datapoints changed from 13311 to 13116.
+udemy <- udemy %>% filter(num_subscribers!= 0)
+
+```
+#EDA
+```{r}
+#Correlation Plot
+
+df <- data.frame(subscribers=udemy$num_subscribers,
+                 avg_rating=udemy$avg_rating,
+                 is_paid=udemy$is_paid,
+                 avg_recent_rating=udemy$avg_rating_recent,
+                 num_reviews=udemy$num_reviews,
+                 num_published_lectures=udemy$num_published_lectures,
+                 num_published_practice_tests=udemy$num_published_practice_tests,
+                 discount_price__amount = udemy$discount_price__amount,
+                 price_detail__amount = udemy$price_detail__amount)
+                 
+corr <- cor(udemy$num_subscribers,df)
+corr
+
+ggcorrplot(corr, lab=TRUE, color=c("blue", "white", "red"), title="Correlation Matrix") +
+  theme(plot.title=element_text(hjust=0.5))
+
+#num_subscibers vs. is_paid
+
+ggplot(udemy, aes(factor(is_paid), log(num_subscribers), fill=factor(is_paid))) + 
+  geom_boxplot(color='black',fill=c('mistyrose','slategray1')) +
+  labs(x = "Is Paid or Not", y = "Log of Number of Subscribers", title = "Boxplot of Is Paid vs. Subscribers") + 
+  theme(legend.position = 'none', plot.title = element_text(size = 9, hjust=0.5))
+
+is.na(udemy$is_paid)
+#num_subscibers vs. avg_rating
+ggplot(udemy, aes(x=avg_rating, y=log(num_subscribers))) + 
+  geom_point(color="dodgerblue", alpha=0.3) +  
+  labs(title="Log Subscriber vs. Average Rating") + 
+  geom_smooth(formula=y~x, method=lm, color="royalblue3", level=0.95, se=FALSE) + 
+  theme(plot.title=element_text(hjust=0.5)) + 
+  scale_y_continuous(labels=function(y){y/10^6})  
+
+#num_subscibers vs. num_published_lectures
+
+ggplot(udemy, aes(x=num_published_lectures, y=log(num_subscribers))) + 
+  geom_point(color="dodgerblue", alpha=0.3) +  
+  labs(title="Log Subscriber vs. Number of Published Lectures") + 
+  geom_smooth(formula=y~x, method=lm, color="royalblue3", level=0.95, se=FALSE) + 
+  theme(plot.title=element_text(hjust=0.5)) + 
+  scale_y_continuous(labels=function(y){y/10^6})  
+
+#num_subscibers vs. num_published_practice_tests
+    #box plot
+ggplot(udemy, aes(factor(num_published_practice_tests), log(num_subscribers), fill=factor(num_published_practice_tests))) + 
+  geom_boxplot(color='black',fill=c('mistyrose','slategray1','palegoldenrod')) +
+  labs(x = "Number of Practice Tests", y = "Log of Number of Subscribers", title = "Practice Test vs. Subscribers") + 
+  theme(legend.position = 'none', plot.title = element_text(size = 9, hjust=0.5))
+
+    #violin plot
+
+ggplot(udemy, aes(x=factor(num_published_practice_tests), y=log(num_subscribers), fill=factor(num_published_practice_tests))) +
+    geom_violin(width=1.4,)+
+    scale_fill_manual(values = c('mistyrose','slategray1','palegoldenrod')) +
+    geom_boxplot(width=0.1, color="black", alpha=0.5, outlier.size=0.1) +
+    labs(x="Number of Practice Tests", y="Log of Number of Subscribers", title = "Practice Test vs. Subscribers") +
+    stat_summary(fun=mean, geom="point") +
+    theme(legend.position="none")
+
+#num_subscibers vs. price_detail_amount
+
+ggplot(udemy, aes(x=price_detail__amount, y=log(num_subscribers))) + 
+  geom_point(color="dodgerblue", alpha=0.3) +  
+  labs(x="Price", y="Log of Number of Subscribers",title="Log Subscriber vs. Price") + 
+  geom_smooth(formula=y~x, method=lm, color="royalblue3", level=0.95, se=FALSE) + 
+  theme(plot.title=element_text(hjust=0.5)) + 
+  scale_y_continuous(labels=function(y){y/10^6}) 
+
+#num_subscibers vs. num_reviews
+
+ggplot(udemy, aes(x=num_reviews, y=log(num_subscribers))) + 
+  geom_point(color="dodgerblue", alpha=0.3) +  
+  labs(x="Number of Reviews", y="Number of Subscribers", title="Number of Subscriber vs. Number of Reviews") + 
+  geom_smooth(formula=y~x, method=lm, color="royalblue3", level=0.95, se=FALSE) + 
+  theme(plot.title=element_text(hjust=0.5)) + 
+  scale_y_continuous(labels=function(y){y/10^6}) 
+
+#num_subscribers vs. published_time
+
+ggplot(udemy, aes(x=age, y=log(num_subscribers))) + 
+  geom_point(color="dodgerblue", alpha=0.3) +  
+  labs(x="Time the Course on Udemy by Month", y="Number of Subscribers", title="Number of Subscriber vs. Published Time in Month") + 
+  geom_smooth(formula=y~x, method=lm, color="royalblue3", level=0.95, se=FALSE) + 
+  theme(plot.title=element_text(hjust=0.5)) + 
+  scale_y_continuous(labels=function(y){y/10^6}) 
+
+```
+#Preliminary Linear Regression
+```{r}
+View(udemy)
+log <- log(udemy$num_subscribers)
+udemy <- cbind(udemy,log)
+m1 <- lm(log~.-id-title-num_subscribers, data = udemy)
+
+summary(m1)
+```
+#Lasso
+```{r}
+library(glmnet)
+# #### First lets set up the data for it
+# #### the features need to be a matrix ([,-1] removes the first column which is the intercept)
+# #udemy <- udemy %>% dplyr::select(-id,-title)
+# 
+# 
+# # Splitting the data into test and train
+# set.seed(1000)
+# train = sample(1:nrow(Mx), nrow(Mx)/2)
+# x_test = (-train)
+# y_test = My[x_test]
+#  
+# cv_output <- cv.glmnet(Mx[train,], My[train],
+#                        alpha = 1, lambda = lambda.theory, 
+#                        nfolds = 5)
+# # identifying best lamda
+# best_lam <- cv_output$lambda.min
+# best_lam
+# 
+# # Rebuilding the model with best lamda value identified
+# lasso_best <- glmnet(Mx[train,], My[train], alpha = 1, lambda = best_lam)
+# pred <- predict(lasso_best, s = best_lam, newx = Mx[x_test,])
+# pred
+# final <- cbind(My[x_test], pred)
+# # Checking the first six obs
+# head(final)
+# 
+# #Get R2
+# Lasso_R2 = R2(pred, y_test)
+# Lasso_R2
+
+##################################################################
+Mx<- model.matrix(log ~.-id-title-num_subscribers, data=udemy)[,-1]
+My <- udemy$log
+lambda.theory <- 10^seq(2, -3, by = -.1)
+
+lassoTheory <- glmnet(Mx, My, alpha = 1, lambda = lambda.theory)
+plot(lassoTheory,xvar = "lambda")
+
+cv.rrfit <- cv.glmnet(Mx, My, alpha = 1, lambda = lambda.theory,standardize =TRUE,nfolds=5)
+plot(cv.rrfit)
+
+lambda.best <- cv.rrfit$lambda.1se
+lambda.best
+
+best.coeff <- glmnet(Mx, My, alpha = 1, lambda = lambda.best)
+coef(best.coeff)
+
+#CF <- as.matrix(coef(cv.rrfit,cv.rrfit$lambda.1se))
+#CF[CF!=0,]
+
+#Create a new udemy dataset based on Lasso results
+udemy <- udemy %>% dplyr::select(-id,-title,-num_subscribers,-is_wishlisted,-num_published_practice_tests,-discount_price__amount)
+```
+#Linear Regression Model After Lasso Selection
+```{r}
+model1 <- lm(log~is_paid+avg_rating+avg_rating_recent+num_reviews+num_published_lectures+published_time+price_detail__amount+age, data=udemy)
+summary(model1)
+```
+#Interaction Linear Regression
+```{r}
+model2 <- lm(log~.^2, data=udemy)
+summary(model2)
+```
+
+#Random Forest
+```{r}
+#Bootstraping the data
+#install.packages("rsample")
+library(rsample)
+set.seed(1000)
+split <- initial_split(udemy, prop = .8)
+train <- training(split)
+test  <- testing(split)
+
+#Generate a basic model to see the trend of error as more trees are added  
+set.seed(1000)
+model3 <-randomForest(log~.,data=train,mtry=3,importance=TRUE, na.action=na.omit) 
+model3
+plot(model3)
+summary(model3)
+varImp(model3)
+varImpPlot(model3,type=2)
+
+
+# # Search for the best number of trees with lowest MSE
+# which.min(model1$mse)
+# ## [1] 969
+#   # RMSE of this optimal random forest
+#   sqrt(model1$mse[which.min(model1$mse)])
+#   ## [1] 1.35588
+#   
+# #Search for the best mtry
+# set.seed(1000)
+# tuneGrid <- expand.grid(.mtry = c(1: 10))
+# rf_mtry <- train(log~.,data=udemy,nodesize = 4,ntree = 969)
+# print(rf_mtry)
+# 
+
+```
+##Calculate the accuracy of the model
+```{r}
+##################### Model 1: Linear Regression###################################
+RSS1 <- c(crossprod(model1$residuals))
+MSE1 <- RSS1 / length(model1$residuals)
+RMSE1 <- sqrt(MSE1)
+predValues1 <- predict(model1,udemy)
+MAE1 <- MAE(predValues1, udemy$log)
+library(Metrics)
+MAPE1 <- mape(predValues1, udemy$log)
+##################### Model 1: Linear Regression###################################
+RSS2 <- c(crossprod(model2$residuals))
+MSE2 <- RSS2 / length(model2$residuals)
+RMSE2 <- sqrt(MSE2)
+predValues2 <- predict(model2,udemy)
+MAE2 <- MAE(predValues2, udemy$log)
+MAPE2 <- mape(predValues2, udemy$log)
+##################### Model 3: Linear Regression###################################
+# obtain MSE as of last element in fit$mse
+# which should match the output from printout
+model3$mse[length(model3$mse)]
+# take square root to calculate RMSE for the model
+sqrt(model3$mse[length(model3$mse)])
+
+# now illustrate how to calculate RMSE on test data vs. training data
+predValues3 <- predict(model3,test)
+
+# we can calculate it  directly 
+RMSE3 <- sqrt(mean((test$log -predValues3)^2)) #RMSE
+MAE3 <- mean(abs(test$log -predValues3)) #MAE
+MAPE3 <- mape(predValues3, test$log)
+######MAPE
+mean(abs((data$actual-data$forecast)/data$actual)) * 100
+
+#NOW EVERYTHING TOGETHER
+RMSE1
+MAE1
+MAPE1
+RMSE2
+MAE2
+MAPE2
+RMSE3
+MAE3
+MAPE3
+#Random Forest Wins!
+```
+```{r}
+### Lets plot FPR and TPR
+
+```
+
+
+
